@@ -12,7 +12,19 @@ async function getCsrfToken() {
     throw new Error("Unable to obtain CSRF token.");
   }
 
-  return response.json();
+  // Ensure the CSRF cookie has been received.
+  const data = await response.json();
+  const cookieToken = document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith("XSRF-TOKEN="))
+    ?.substring("XSRF-TOKEN=".length);
+
+  return {
+    headerName: data.headerName || "X-XSRF-TOKEN",
+    token: cookieToken
+      ? decodeURIComponent(cookieToken)
+      : data.token,
+  };
 }
 
 export async function apiRequest(path, options = {}) {
@@ -23,9 +35,7 @@ export async function apiRequest(path, options = {}) {
     ...options.headers,
   };
 
-  const unsafeMethods = ["POST", "PUT", "PATCH", "DELETE"];
-
-  if (unsafeMethods.includes(method)) {
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     const csrf = await getCsrfToken();
     headers[csrf.headerName] = csrf.token;
   }

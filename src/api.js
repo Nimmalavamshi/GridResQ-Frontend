@@ -12,12 +12,7 @@ async function getCsrfToken() {
     throw new Error("Unable to obtain CSRF token.");
   }
 
-  const data = await response.json();
-
-  return {
-    headerName: data.headerName || "X-XSRF-TOKEN",
-    token: data.token,
-  };
+  return response.json();
 }
 
 export async function apiRequest(path, options = {}) {
@@ -28,7 +23,9 @@ export async function apiRequest(path, options = {}) {
     ...options.headers,
   };
 
-  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+  const unsafeMethods = ["POST", "PUT", "PATCH", "DELETE"];
+
+  if (unsafeMethods.includes(method)) {
     const csrf = await getCsrfToken();
     headers[csrf.headerName] = csrf.token;
   }

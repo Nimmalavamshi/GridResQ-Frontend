@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import "./App.css";
-
-const API_URL = "http://localhost:8080/api";
+import AuthPage from "./AuthPage";
+import AdminPage from "./AdminPage";
+import { apiRequest } from "./api";
 
 const DEFAULT_SYSTEMS = [
   { id: 1, name: "Power Grid", capacity: 95, status: "Operational" },
@@ -28,6 +29,14 @@ const CONNECTIONS = [
   ["Telecom Tower", "Emergency Center"],
 ];
 
+const DEFAULT_DEPENDENCIES = {
+  "Power Grid": [],
+  "Water Network": ["Power Grid"],
+  "Telecom Tower": ["Power Grid"],
+  "Hospital H1": ["Power Grid", "Water Network"],
+  "Emergency Center": ["Power Grid", "Telecom Tower"],
+};
+
 function getStatusClass(status) {
   if (status === "Initial Failure") return "failed";
   if (status === "Affected") return "affected";
@@ -42,7 +51,8 @@ function getHealth(capacities, systems) {
   if (!values.length) return 0;
 
   return Math.round(
-    values.reduce((total, value) => total + value, 0) / values.length
+    values.reduce((total, value) => total + value, 0) /
+      values.length
   );
 }
 
@@ -50,7 +60,14 @@ function formatTime(value) {
   if (!value) return "—";
 
   if (Array.isArray(value)) {
-    const [year, month, day, hour = 0, minute = 0, second = 0] = value;
+    const [
+      year,
+      month,
+      day,
+      hour = 0,
+      minute = 0,
+      second = 0,
+    ] = value;
 
     return new Date(
       year,
@@ -97,28 +114,24 @@ function getRecoveryRecommendations(component, health) {
       "Assess dependent water and telecommunications infrastructure.",
       "Prioritize restoration of critical infrastructure.",
     ],
-
     "Water Network": [
       "Inspect the simulated water network failure.",
       "Assess water availability at the hospital.",
       "Evaluate emergency water storage and alternative supply.",
       "Verify service restoration before returning to normal operation.",
     ],
-
     "Telecom Tower": [
       "Inspect the simulated telecommunications failure.",
       "Evaluate backup communication channels.",
       "Prioritize communications for emergency services.",
       "Verify connectivity after simulated recovery.",
     ],
-
     "Hospital H1": [
       "Assess the simulated hospital service interruption.",
       "Evaluate continuity plans for essential medical services.",
       "Check backup power and communications availability.",
       "Prioritize safe restoration of hospital operations.",
     ],
-
     "Emergency Center": [
       "Assess the simulated emergency center interruption.",
       "Evaluate alternative emergency coordination arrangements.",
@@ -152,6 +165,11 @@ function getRecoveryRecommendations(component, health) {
 }
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
+
   const [systems, setSystems] = useState(DEFAULT_SYSTEMS);
   const [selectedSystem, setSelectedSystem] = useState("Power Grid");
   const [simulation, setSimulation] = useState(null);
@@ -163,19 +181,82 @@ function App() {
   const [historyError, setHistoryError] = useState("");
 
   useEffect(() => {
-    loadInfrastructure();
-    loadDatabaseHistory();
+    let cancelled = false;
+
+    async function checkSession() {
+      try {
+        const currentUser = await apiRequest("/auth/me");
+
+        if (!cancelled) {
+          setUser(currentUser);
+        }
+      } catch {
+        if (!cancelled) {
+          setUser(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecking(false);
+        }
+      }
+    }
+
+    checkSession();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    loadInfrastructure();
+
+    if (user.role === "ADMIN") {
+      loadDatabaseHistory();
+    } else {
+      setHistory([]);
+      setHistoryError("");
+    }
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  function handleLogin(loggedInUser) {
+    setUser(loggedInUser);
+    setShowAdmin(false);
+    setError("");
+    setHistoryError("");
+  }
+
+  async function handleLogout() {
+    setLogoutLoading(true);
+
+    try {
+      await apiRequest("/auth/logout", { method: "POST" });
+    } catch (logoutError) {
+      setError(
+        logoutError.message ||
+          "Logout request failed. Please try again."
+      );
+      setLogoutLoading(false);
+      return;
+    }
+
+    setLogoutLoading(false);
+    setUser(null);
+    setShowAdmin(false);
+    setSimulation(null);
+    setHistory([]);
+    setBackendConnected(false);
+    setError("");
+    setHistoryError("");
+  }
 
   async function loadInfrastructure() {
     try {
-      const response = await fetch(`${API_URL}/infrastructure`);
-
-      if (!response.ok) {
-        throw new Error("Infrastructure request failed");
-      }
-
-      const data = await response.json();
+      const data = await apiRequest("/infrastructure");
 
       if (Array.isArray(data) && data.length > 0) {
         setSystems(
@@ -190,29 +271,26 @@ function App() {
 
       setBackendConnected(true);
       setError("");
-    } catch {
+    } catch (requestError) {
       setBackendConnected(false);
       setError(
-        "Cannot connect to the backend. Start Spring Boot on port 8080."
+        requestError.message ||
+          "Cannot load infrastructure. Check the backend."
       );
     }
   }
 
   async function loadDatabaseHistory() {
+    if (user?.role !== "ADMIN") return;
+
     setHistoryLoading(true);
     setHistoryError("");
 
     try {
-      const response = await fetch(`${API_URL}/history`);
-
-      if (!response.ok) {
-        throw new Error("History request failed");
-      }
-
-      const data = await response.json();
+      const data = await apiRequest("/history");
 
       if (!Array.isArray(data)) {
-        throw new Error("Invalid history response");
+        throw new Error("Invalid history response.");
       }
 
       setHistory(
@@ -225,9 +303,10 @@ function App() {
           afterHealth: Number(item.systemHealth ?? 0),
         }))
       );
-    } catch {
+    } catch (requestError) {
       setHistoryError(
-        "Unable to load database history. Check the backend connection."
+        requestError.message ||
+          "Unable to load database history."
       );
     } finally {
       setHistoryLoading(false);
@@ -239,40 +318,46 @@ function App() {
     setError("");
 
     try {
-      const response = await fetch(`${API_URL}/simulation`, {
+      const data = await apiRequest("/simulation", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          component: selectedSystem,
-        }),
+        body: JSON.stringify({ component: selectedSystem }),
       });
-
-      if (!response.ok) {
-        throw new Error("Simulation request failed");
-      }
-
-      const data = await response.json();
 
       const baselineCapacities = Object.fromEntries(
-        systems.map((system) => [system.name, system.capacity])
+        systems.map((system) => [
+          system.name,
+          system.capacity,
+        ])
       );
 
-      const beforeHealth = getHealth(baselineCapacities, systems);
+      const beforeHealth = getHealth(
+        baselineCapacities,
+        systems
+      );
 
-      setSimulation({
+      const normalizedSimulation = {
         ...data,
         beforeHealth,
-      });
+        dependencies:
+          data.dependencies ?? DEFAULT_DEPENDENCIES,
+        recoveryRecommendations:
+          data.recoveryRecommendations ??
+          getRecoveryRecommendations(
+            data.initialFailure ?? selectedSystem,
+            Number(data.systemHealth ?? beforeHealth)
+          ),
+      };
 
+      setSimulation(normalizedSimulation);
       setBackendConnected(true);
 
-      // Load the saved record from MySQL.
-      await loadDatabaseHistory();
-    } catch {
+      if (user?.role === "ADMIN") {
+        await loadDatabaseHistory();
+      }
+    } catch (requestError) {
       setError(
-        "Simulation failed. Check the backend terminal and database connection."
+        requestError.message ||
+          "Simulation failed. Check the backend and database."
       );
     } finally {
       setLoading(false);
@@ -280,22 +365,25 @@ function App() {
   }
 
   async function resetSimulation() {
+    if (user?.role !== "ADMIN") {
+      setError("Only administrators can reset simulations.");
+      return;
+    }
+
     setLoading(true);
     setError("");
 
     try {
-      const response = await fetch(`${API_URL}/simulation/reset`, {
+      await apiRequest("/simulation/reset", {
         method: "POST",
       });
 
-      if (!response.ok) {
-        throw new Error("Reset request failed");
-      }
-
-      // This resets the active display, not saved database records.
       setSimulation(null);
-    } catch {
-      setError("Could not reset the simulation. Check the backend.");
+    } catch (requestError) {
+      setError(
+        requestError.message ||
+          "Could not reset the simulation."
+      );
     } finally {
       setLoading(false);
     }
@@ -309,7 +397,9 @@ function App() {
 
   function getCapacity(name) {
     if (!simulation) {
-      return systems.find((system) => system.name === name)?.capacity ?? 0;
+      return (
+        systems.find((system) => system.name === name)?.capacity ?? 0
+      );
     }
 
     return Number(
@@ -341,6 +431,11 @@ function App() {
   }
 
   function downloadCSV() {
+    if (user?.role !== "ADMIN") {
+      setError("Only administrators can export simulation history.");
+      return;
+    }
+
     if (history.length === 0) {
       setError("There are no saved simulations to export.");
       return;
@@ -394,22 +489,64 @@ function App() {
 
   const baselineHealth = getHealth(
     Object.fromEntries(
-      systems.map((system) => [system.name, system.capacity])
+      systems.map((system) => [
+        system.name,
+        system.capacity,
+      ])
     ),
     systems
   );
 
   const currentHealth = simulation
-    ? Number(simulation.systemHealth)
+    ? Number(simulation.systemHealth ?? baselineHealth)
     : baselineHealth;
 
   const affectedCount = simulation?.affectedCount ?? 0;
 
   const operationalCount = simulation
-    ? simulation.stillOperational
-    : systems.filter((system) => system.status === "Operational").length;
+    ? Number(
+        simulation.stillOperational ??
+          simulation.operationalCount ??
+          0
+      )
+    : systems.filter(
+        (system) => system.status === "Operational"
+      ).length;
 
-  const riskLevel = getRiskLevel(currentHealth);
+  const riskLevel =
+    simulation?.riskLevel ?? getRiskLevel(currentHealth);
+
+  const recoveryRecommendations = simulation
+    ? simulation.recoveryRecommendations ??
+      getRecoveryRecommendations(
+        simulation.initialFailure,
+        currentHealth
+      )
+    : [];
+
+  const dependencies =
+    simulation?.dependencies ?? DEFAULT_DEPENDENCIES;
+
+  if (authChecking) {
+    return (
+      <div className="auth-loading">
+        Checking your GridResQ session...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage onLogin={handleLogin} />;
+  }
+
+  // Only ADMIN accounts can open the Admin Dashboard.
+  if (showAdmin && user.role === "ADMIN") {
+    return (
+      <AdminPage
+        onBack={() => setShowAdmin(false)}
+      />
+    );
+  }
 
   return (
     <div className="app">
@@ -457,16 +594,30 @@ function App() {
           <span>◉</span> Simulations
         </button>
 
-        <button
-          className="nav-item"
-          onClick={() =>
-            document
-              .getElementById("history-section")
-              ?.scrollIntoView({ behavior: "smooth" })
-          }
-        >
-          <span>▤</span> Reports & History
-        </button>
+        {user.role === "ADMIN" && (
+          <button
+            className="nav-item"
+            onClick={() =>
+              document
+                .getElementById("history-section")
+                ?.scrollIntoView({ behavior: "smooth" })
+            }
+          >
+            <span>▤</span> Reports & History
+          </button>
+        )}
+
+        {user.role === "ADMIN" && (
+          <button
+            className="nav-item"
+            onClick={() => {
+              setShowAdmin(true);
+              setError("");
+            }}
+          >
+            <span>⚙</span> Admin Dashboard
+          </button>
+        )}
 
         <div className="sidebar-bottom">
           <div className="connection-card">
@@ -475,9 +626,12 @@ function App() {
                 backendConnected ? "online" : "offline"
               }`}
             />
+
             <div>
               <strong>Backend Status</strong>
-              <p>{backendConnected ? "Connected" : "Disconnected"}</p>
+              <p>
+                {backendConnected ? "Connected" : "Disconnected"}
+              </p>
             </div>
           </div>
 
@@ -492,10 +646,15 @@ function App() {
       <main className="main-content" id="dashboard">
         <header className="topbar">
           <div>
-            <div className="breadcrumb">Workspace / Dashboard</div>
+            <div className="breadcrumb">
+              Workspace / Dashboard
+            </div>
+
             <h1>Infrastructure Resilience Dashboard</h1>
+
             <p className="subtitle">
-              Monitor critical infrastructure and simulate cascading failures.
+              Monitor critical infrastructure and simulate cascading
+              failures.
             </p>
           </div>
 
@@ -503,7 +662,19 @@ function App() {
             <span className="live-indicator">
               <span /> SYSTEM MONITOR
             </span>
-            <div className="avatar">GR</div>
+
+            <div className="user-info">
+              <strong>{user.fullName}</strong>
+              <span>{user.role}</span>
+            </div>
+
+            <button
+              className="logout-button"
+              onClick={handleLogout}
+              disabled={logoutLoading}
+            >
+              {logoutLoading ? "Logging out..." : "Logout"}
+            </button>
           </div>
         </header>
 
@@ -517,7 +688,9 @@ function App() {
         <section className="metrics-grid">
           <div className="metric-card">
             <div className="metric-top">
-              <span className="metric-label">INFRASTRUCTURE SYSTEMS</span>
+              <span className="metric-label">
+                INFRASTRUCTURE SYSTEMS
+              </span>
               <span className="metric-icon blue">⌘</span>
             </div>
             <div className="metric-value">{systems.length}</div>
@@ -528,7 +701,9 @@ function App() {
 
           <div className="metric-card">
             <div className="metric-top">
-              <span className="metric-label">CURRENT SYSTEM HEALTH</span>
+              <span className="metric-label">
+                CURRENT SYSTEM HEALTH
+              </span>
               <span className="metric-icon green">♥</span>
             </div>
             <div className="metric-value">
@@ -545,7 +720,10 @@ function App() {
                     : ""
                 }`}
                 style={{
-                  width: `${Math.max(0, Math.min(100, currentHealth))}%`,
+                  width: `${Math.max(
+                    0,
+                    Math.min(100, currentHealth)
+                  )}%`,
                 }}
               />
             </div>
@@ -553,7 +731,9 @@ function App() {
 
           <div className="metric-card">
             <div className="metric-top">
-              <span className="metric-label">AFFECTED COMPONENTS</span>
+              <span className="metric-label">
+                AFFECTED COMPONENTS
+              </span>
               <span className="metric-icon orange">⚠</span>
             </div>
             <div className="metric-value">{affectedCount}</div>
@@ -564,7 +744,9 @@ function App() {
 
           <div className="metric-card">
             <div className="metric-top">
-              <span className="metric-label">OPERATIONAL SYSTEMS</span>
+              <span className="metric-label">
+                OPERATIONAL SYSTEMS
+              </span>
               <span className="metric-icon green">✓</span>
             </div>
             <div className="metric-value">{operationalCount}</div>
@@ -595,7 +777,9 @@ function App() {
             <span>HEALTH CHANGE</span>
             <strong
               className={
-                currentHealth < baselineHealth ? "text-red" : "text-green"
+                currentHealth < baselineHealth
+                  ? "text-red"
+                  : "text-green"
               }
             >
               {currentHealth - baselineHealth > 0 ? "+" : ""}
@@ -606,13 +790,17 @@ function App() {
         </section>
 
         <section className="content-grid">
-          <div className="panel network-panel" id="network-section">
+          <div
+            className="panel network-panel"
+            id="network-section"
+          >
             <div className="panel-header">
               <div>
                 <h2>Infrastructure Network</h2>
-                <p>Visual representation of infrastructure dependencies</p>
+                <p>
+                  Visual representation of infrastructure dependencies
+                </p>
               </div>
-
               <span className="panel-badge">
                 {simulation ? "SIMULATION ACTIVE" : "NORMAL STATE"}
               </span>
@@ -625,8 +813,12 @@ function App() {
                 preserveAspectRatio="none"
               >
                 {CONNECTIONS.map(([source, target]) => {
-                  const a = NODES.find((node) => node.name === source);
-                  const b = NODES.find((node) => node.name === target);
+                  const a = NODES.find(
+                    (node) => node.name === source
+                  );
+                  const b = NODES.find(
+                    (node) => node.name === target
+                  );
 
                   return (
                     <line
@@ -635,7 +827,10 @@ function App() {
                       y1={a.y}
                       x2={b.x}
                       y2={b.y}
-                      className={getConnectionStatus(source, target)}
+                      className={getConnectionStatus(
+                        source,
+                        target
+                      )}
                     />
                   );
                 })}
@@ -679,7 +874,10 @@ function App() {
             </div>
           </div>
 
-          <div className="panel simulation-panel" id="simulation-section">
+          <div
+            className="panel simulation-panel"
+            id="simulation-section"
+          >
             <div className="panel-header">
               <div>
                 <h2>Scenario Lab</h2>
@@ -692,11 +890,12 @@ function App() {
               <label htmlFor="failure-component">
                 INITIAL FAILURE COMPONENT
               </label>
-
               <select
                 id="failure-component"
                 value={selectedSystem}
-                onChange={(event) => setSelectedSystem(event.target.value)}
+                onChange={(event) =>
+                  setSelectedSystem(event.target.value)
+                }
               >
                 {systems.map((system) => (
                   <option key={system.name} value={system.name}>
@@ -711,8 +910,9 @@ function App() {
               <div>
                 <strong>Failure Scenario</strong>
                 <p>
-                  Simulate the loss of <strong>{selectedSystem}</strong> and
-                  observe the potential impact on connected infrastructure.
+                  Simulate the loss of{" "}
+                  <strong>{selectedSystem}</strong> and observe the
+                  potential impact on connected infrastructure.
                 </p>
               </div>
             </div>
@@ -726,29 +926,30 @@ function App() {
                 {loading ? "Processing..." : "▶ Run Simulation"}
               </button>
 
-              <button
-                className="secondary-button"
-                onClick={resetSimulation}
-                disabled={loading}
-              >
-                ↻ Reset
-              </button>
+              {user.role === "ADMIN" && (
+                <button
+                  className="secondary-button"
+                  onClick={resetSimulation}
+                  disabled={loading}
+                >
+                  ↻ Reset
+                </button>
+              )}
             </div>
 
             <div className="scenario-divider" />
-
             <h3 className="mini-heading">SIMULATION SUMMARY</h3>
 
             <div className="summary-row">
               <span>Initial failure</span>
-              <strong>{simulation?.initialFailure ?? "Not started"}</strong>
+              <strong>
+                {simulation?.initialFailure ?? "Not started"}
+              </strong>
             </div>
-
             <div className="summary-row">
               <span>Affected components</span>
               <strong>{affectedCount}</strong>
             </div>
-
             <div className="summary-row">
               <span>Remaining operational</span>
               <strong>{operationalCount}</strong>
@@ -762,12 +963,14 @@ function App() {
           </div>
         </section>
 
-        {/* Risk Assessment and Recovery Recommendations */}
         <section className="panel results-panel">
           <div className="panel-header">
             <div>
               <h2>Risk Assessment & Recovery</h2>
-              <p>Simulation-based risk classification and recovery guidance.</p>
+              <p>
+                Simulation-based risk classification and recovery
+                guidance.
+              </p>
             </div>
             <span className="results-count">RISK ANALYSIS</span>
           </div>
@@ -777,14 +980,13 @@ function App() {
               <div>⚠</div>
               <strong>No active failure scenario</strong>
               <p>
-                Run a simulation to calculate risk and display recovery
-                recommendations.
+                Run a simulation to calculate risk and display
+                recovery recommendations.
               </p>
             </div>
           ) : (
             <div style={{ padding: "20px" }}>
               <span className="metric-label">SIMULATED RISK LEVEL</span>
-
               <h2
                 style={{
                   color: getRiskColor(riskLevel),
@@ -799,43 +1001,80 @@ function App() {
                 {affectedCount}
               </p>
 
+              <div style={{ marginTop: "24px" }}>
+                <h3>Infrastructure Dependencies</h3>
+                <p style={{ fontSize: "13px", color: "#64748b" }}>
+                  Modeled dependencies used in this illustrative
+                  simulation.
+                </p>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "10px",
+                    marginTop: "14px",
+                  }}
+                >
+                  {Object.entries(dependencies).map(
+                    ([component, componentDependencies]) => (
+                      <div
+                        key={component}
+                        style={{
+                          padding: "12px",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: "8px",
+                          background: "#f8fafc",
+                        }}
+                      >
+                        <strong>{component}</strong>
+                        <p
+                          style={{
+                            margin: "5px 0 0",
+                            color: "#475569",
+                            fontSize: "13px",
+                          }}
+                        >
+                          Depends on:{" "}
+                          {Array.isArray(componentDependencies) &&
+                          componentDependencies.length
+                            ? componentDependencies.join(", ")
+                            : "No modeled dependencies"}
+                        </p>
+                      </div>
+                    )
+                  )}
+                </div>
+              </div>
+
               <h3 style={{ marginTop: "24px" }}>
                 Recommended Recovery Actions
               </h3>
-
               <ol style={{ lineHeight: "2", paddingLeft: "22px" }}>
-                {getRecoveryRecommendations(
-                  simulation.initialFailure,
-                  currentHealth
-                ).map((recommendation, index) => (
-                  <li key={index} style={{ marginBottom: "8px" }}>
+                {recoveryRecommendations.map((recommendation, index) => (
+                  <li
+                    key={`${index}-${recommendation}`}
+                    style={{ marginBottom: "8px" }}
+                  >
                     {recommendation}
                   </li>
                 ))}
               </ol>
 
-              <p
-                style={{
-                  fontSize: "12px",
-                  color: "#64748b",
-                  marginTop: "16px",
-                }}
-              >
-                Risk thresholds and recommendations are illustrative prototype
-                rules, not validated real-world safety assessments.
+              <p style={{ fontSize: "12px", color: "#64748b" }}>
+                Risk thresholds, dependencies, and recommendations are
+                illustrative prototype rules, not validated real-world
+                safety assessments.
               </p>
             </div>
           )}
         </section>
 
-        {/* Infrastructure Assessment */}
         <section className="panel results-panel">
           <div className="panel-header">
             <div>
               <h2>Infrastructure Assessment</h2>
               <p>Component capacity and operational status</p>
             </div>
-
             <span className="results-count">
               {systems.length} COMPONENTS
             </span>
@@ -851,7 +1090,6 @@ function App() {
                   <th>STATUS</th>
                 </tr>
               </thead>
-
               <tbody>
                 {systems.map((system) => {
                   const capacity = getCapacity(system.name);
@@ -862,21 +1100,18 @@ function App() {
                       <td>
                         <div className="table-system">
                           <span
-                            className={`table-system-icon ${getStatusClass(
-                              status
-                            )}`}
+                            className={`table-system-icon ${getStatusClass(status)}`}
                           >
-                            {NODES.find((node) => node.name === system.name)
-                              ?.icon ?? "●"}
+                            {NODES.find(
+                              (node) => node.name === system.name
+                            )?.icon ?? "●"}
                           </span>
                           <strong>{system.name}</strong>
                         </div>
                       </td>
-
                       <td>
                         <strong>{capacity}%</strong>
                       </td>
-
                       <td>
                         <div className="table-progress">
                           <div
@@ -896,7 +1131,6 @@ function App() {
                           />
                         </div>
                       </td>
-
                       <td>
                         <span
                           className={`status-pill ${getStatusClass(status)}`}
@@ -917,114 +1151,117 @@ function App() {
                 ? "Showing simulated infrastructure results"
                 : "Showing baseline infrastructure data"}
             </span>
-
-            <button onClick={loadInfrastructure}>↻ Refresh data</button>
+            <button onClick={loadInfrastructure}>
+              ↻ Refresh data
+            </button>
           </div>
         </section>
 
-        {/* MySQL Simulation History */}
-        <section className="panel history-panel" id="history-section">
-          <div className="panel-header history-header">
-            <div>
-              <h2>Simulation History & Reports</h2>
-              <p>Saved scenarios retrieved from the MySQL database.</p>
+        {user.role === "ADMIN" && (
+          <section
+            className="panel history-panel"
+            id="history-section"
+          >
+            <div className="panel-header history-header">
+              <div>
+                <h2>Simulation History & Reports</h2>
+                <p>
+                  Saved scenarios retrieved from the MySQL database.
+                </p>
+              </div>
+
+              <div className="history-actions">
+                <button
+                  className="secondary-button"
+                  onClick={loadDatabaseHistory}
+                  disabled={historyLoading}
+                >
+                  {historyLoading ? "Loading..." : "↻ Refresh History"}
+                </button>
+                <button
+                  className="primary-button download-button"
+                  onClick={downloadCSV}
+                  disabled={history.length === 0}
+                >
+                  ↓ Download CSV
+                </button>
+              </div>
             </div>
 
-            <div className="history-actions">
-              <button
-                className="secondary-button"
-                onClick={loadDatabaseHistory}
-                disabled={historyLoading}
-              >
-                {historyLoading ? "Loading..." : "↻ Refresh History"}
-              </button>
+            {historyError && (
+              <div className="error-banner" role="alert">
+                <span>⚠ {historyError}</span>
+                <button onClick={() => setHistoryError("")}>×</button>
+              </div>
+            )}
 
-              <button
-                className="primary-button download-button"
-                onClick={downloadCSV}
-                disabled={history.length === 0}
-              >
-                ↓ Download CSV
-              </button>
-            </div>
-          </div>
-
-          {historyError && (
-            <div className="error-banner" role="alert">
-              <span>⚠ {historyError}</span>
-              <button onClick={() => setHistoryError("")}>×</button>
-            </div>
-          )}
-
-          <div className="history-stats">
-            <div>
-              <span>Recorded simulations</span>
-              <strong>{history.length}</strong>
+            <div className="history-stats">
+              <div>
+                <span>Recorded simulations</span>
+                <strong>{history.length}</strong>
+              </div>
+              <div>
+                <span>Most recent scenario</span>
+                <strong>{history[0]?.component ?? "None yet"}</strong>
+              </div>
+              <div>
+                <span>Latest health after failure</span>
+                <strong>
+                  {history.length ? `${history[0].afterHealth}%` : "—"}
+                </strong>
+              </div>
             </div>
 
-            <div>
-              <span>Most recent scenario</span>
-              <strong>{history[0]?.component ?? "None yet"}</strong>
-            </div>
-
-            <div>
-              <span>Latest health after failure</span>
-              <strong>
-                {history.length ? `${history[0].afterHealth}%` : "—"}
-              </strong>
-            </div>
-          </div>
-
-          {historyLoading && history.length === 0 ? (
-            <div className="empty-history">
-              <div>↻</div>
-              <strong>Loading saved simulations...</strong>
-              <p>Retrieving records from the backend.</p>
-            </div>
-          ) : history.length === 0 ? (
-            <div className="empty-history">
-              <div>▤</div>
-              <strong>No simulation history yet</strong>
-              <p>Run a failure scenario to save a record in MySQL.</p>
-            </div>
-          ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>DATABASE ID</th>
-                    <th>TIME</th>
-                    <th>INITIAL FAILURE</th>
-                    <th>AFFECTED</th>
-                    <th>HEALTH AFTER</th>
-                    <th>OPERATIONAL</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {history.map((record) => (
-                    <tr key={record.id}>
-                      <td>{record.id}</td>
-                      <td>{record.time}</td>
-                      <td>
-                        <strong>{record.component}</strong>
-                      </td>
-                      <td>{record.affectedCount}</td>
-                      <td className="text-red">{record.afterHealth}%</td>
-                      <td>{record.stillOperational}</td>
+            {historyLoading && history.length === 0 ? (
+              <div className="empty-history">
+                <div>↻</div>
+                <strong>Loading saved simulations...</strong>
+                <p>Retrieving records from the backend.</p>
+              </div>
+            ) : history.length === 0 ? (
+              <div className="empty-history">
+                <div>▤</div>
+                <strong>No simulation history yet</strong>
+                <p>
+                  Run a failure scenario to save a record in MySQL.
+                </p>
+              </div>
+            ) : (
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>DATABASE ID</th>
+                      <th>TIME</th>
+                      <th>INITIAL FAILURE</th>
+                      <th>AFFECTED</th>
+                      <th>HEALTH AFTER</th>
+                      <th>OPERATIONAL</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody>
+                    {history.map((record) => (
+                      <tr key={record.id}>
+                        <td>{record.id}</td>
+                        <td>{record.time}</td>
+                        <td><strong>{record.component}</strong></td>
+                        <td>{record.affectedCount}</td>
+                        <td className="text-red">{record.afterHealth}%</td>
+                        <td>{record.stillOperational}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
-          <p className="history-note">
-            History is retrieved from MySQL and remains available after a
-            browser refresh. Resetting the active simulation does not delete
-            database records.
-          </p>
-        </section>
+            <p className="history-note">
+              History is retrieved from MySQL and remains available
+              after a browser refresh. Resetting the active simulation
+              does not delete database records.
+            </p>
+          </section>
+        )}
 
         <footer className="app-footer">
           <span>GridResQ © 2026</span>

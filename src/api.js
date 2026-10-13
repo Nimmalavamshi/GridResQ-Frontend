@@ -12,18 +12,11 @@ async function getCsrfToken() {
     throw new Error("Unable to obtain CSRF token.");
   }
 
-  // Ensure the CSRF cookie has been received.
   const data = await response.json();
-  const cookieToken = document.cookie
-    .split("; ")
-    .find((cookie) => cookie.startsWith("XSRF-TOKEN="))
-    ?.substring("XSRF-TOKEN=".length);
 
   return {
     headerName: data.headerName || "X-XSRF-TOKEN",
-    token: cookieToken
-      ? decodeURIComponent(cookieToken)
-      : data.token,
+    token: data.token,
   };
 }
 
